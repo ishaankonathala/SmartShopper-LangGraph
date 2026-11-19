@@ -1,45 +1,44 @@
-"""Bounded planning, registered tool execution, and deterministic evaluation."""
+"""LangGraph-driven bounded shopping assistant agent orchestration."""
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from typing import Final
 
-from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from app.agent.graph import run_shopper_graph
 from app.agent.planner import AgentPlanner
 from app.agent.schemas import (
-    EvaluationArguments,
     EvaluationResult,
     PreferenceSimulationResult,
     ProductComparisonResult,
     ShopperProfileResult,
-    ToolSelection,
 )
-from app.agent.state import AgentState, ToolExecutionRecord, ToolSelectionSource
-from app.agent.tool_registry import (
-    InvalidToolArgumentsError,
-    ToolRegistry,
-    UnknownToolError,
+from app.agent.state import (
+    AgentState,
+    ShopperGraphState,
+    ToolExecutionRecord,
+    graph_state_to_agent_state,
 )
+from app.agent.tool_registry import ToolRegistry
 from app.agent.tools import create_tool_registry
 from app.schemas.assistant import AgentActivityEvent, AgentExecutionMetadata
 from app.schemas.recommendation import RecommendationResponse
-from app.services.groq_client import GroqClient, GroqClientError
+from app.services.groq_client import GroqClient
 
 MAX_AGENT_TOOL_EXECUTIONS: Final[int] = 5
 MAX_AGENT_SELECTION_ITERATIONS: Final[int] = 3
-_TOOL_TITLES = {
+
+_TOOL_TITLES: Final[dict[str, str]] = {
     "product_search": "Product Search",
     "product_comparison": "Product Comparison",
     "get_shopper_profile": "Shopper Profile",
     "simulate_preferences": "Preference Simulation",
     "evaluate_results": "Recommendation Evaluation",
 }
-_TOOL_ACTIVITY = {
+_TOOL_ACTIVITY: Final[dict[str, str]] = {
     "product_search": "Searching eligible catalogue products.",
     "product_comparison": "Comparing available catalogue fields.",
     "get_shopper_profile": "Checking your saved shopping preferences.",
@@ -369,11 +368,14 @@ class AgentRunResult:
 
 
 class AgentOrchestrator:
+    """Executes the shopping agent workflow compiled in LangGraph."""
+
     def __init__(
         self,
         client: GroqClient,
         registry: ToolRegistry | None = None,
     ) -> None:
+        self._client = client
         self._registry = registry or create_tool_registry()
         self._planner = AgentPlanner(client, self._registry)
 
@@ -382,301 +384,26 @@ class AgentOrchestrator:
             state.remaining_execution_budget,
             MAX_AGENT_TOOL_EXECUTIONS,
         )
-        seen_calls: set[str] = set()
 
-        for _ in range(MAX_AGENT_SELECTION_ITERATIONS):
-            if state.remaining_execution_budget <= 0:
-                state.execution_status = "partial"
-                break
+        final_graph_state = run_shopper_graph(
+            state,
+            db,
+            self._client,
+            self._registry,
+        )
 
-            try:
-                policy_selection = self._comparison_selection(state)
-                if policy_selection is not None:
-                    selection = policy_selection
-                    selection_source = "policy"
-                else:
-                    selection = self._planner.select_next_tool(state)
-                    selection_source = "planner"
-            except (GroqClientError, ValidationError, ValueError, TypeError) as error:
-                state.planning_failed = True
-                logger.warning(
-                    "Agent planning unavailable (%s).",
-                    type(error).__name__,
-                )
-                state.execution_status = "fallback"
-                self._run_safe_fallback(state, db, seen_calls)
-                break
-
-            state.current_plan = selection
-            fingerprint = self._fingerprint(selection)
-            if fingerprint in seen_calls:
-                state.execution_status = "partial"
-                state.completed_steps.append("Repeated tool call prevented.")
-                break
-            seen_calls.add(fingerprint)
-
-            if state.remaining_execution_budget == 1 and selection.tool_name != "evaluate_results":
-                state.execution_status = "partial"
-                state.completed_steps.append("Execution budget reserved for evaluation.")
-                break
-
-            record_index = self._execute_selection(
-                selection,
-                state,
-                db,
-                selection_source=selection_source,
-            )
-            if record_index is None:
-                continue
-            record = state.tool_results[record_index]
-            if selection.tool_name == "evaluate_results":
-                if isinstance(record.result, EvaluationResult):
-                    state.latest_evaluation = record.result
-                    if record.result.satisfied:
-                        state.execution_status = "completed"
-                        break
-                    if record.result.outcome == "constraint_violation":
-                        state.execution_status = "partial"
-                        break
-                continue
-
-            if state.remaining_execution_budget <= 0:
-                state.execution_status = "partial"
-                break
-            evaluation_index = self._execute_selection(
-                ToolSelection(
-                    tool_name="evaluate_results",
-                    arguments={"result_index": record_index},
-                ),
-                state,
-                db,
-                selection_source="evaluation",
-            )
-            evaluation_selection = ToolSelection(
-                tool_name="evaluate_results",
-                arguments={"result_index": record_index},
-            )
-            seen_calls.add(self._fingerprint(evaluation_selection))
-            if evaluation_index is None:
-                state.execution_status = "partial"
-                break
-            evaluation = state.tool_results[evaluation_index].result
-            if isinstance(evaluation, EvaluationResult):
-                state.latest_evaluation = evaluation
-                if evaluation.satisfied:
-                    state.execution_status = "completed"
-                    break
-                if evaluation.outcome == "constraint_violation":
-                    state.execution_status = "partial"
-                    break
-
-        else:
-            if state.execution_status == "completed":
-                state.execution_status = "partial"
-
-        if (
-            state.fallback_search_allowed
-            and state.constraints.category is not None
-            and not self._has_recommendation_result(state)
-            and state.remaining_execution_budget >= 2
-        ):
-            state.execution_status = "fallback"
-            self._run_safe_fallback(state, db, seen_calls)
-
-        if (
-            state.execution_status == "completed"
-            and state.latest_evaluation is not None
-            and not state.latest_evaluation.satisfied
-        ):
-            state.execution_status = "partial"
+        # Update input state in-place to preserve caller references
+        final_agent_state = graph_state_to_agent_state(final_graph_state)
+        state.current_plan = final_agent_state.current_plan
+        state.planning_failed = final_agent_state.planning_failed
+        state.completed_steps = final_agent_state.completed_steps
+        state.tool_results = final_agent_state.tool_results
+        state.remaining_execution_budget = final_agent_state.remaining_execution_budget
+        state.tool_execution_count = final_agent_state.tool_execution_count
+        state.latest_evaluation = final_agent_state.latest_evaluation
+        state.execution_status = final_agent_state.execution_status
 
         return self._result(state)
-
-    @staticmethod
-    def _has_recommendation_result(state: AgentState) -> bool:
-        return any(
-            isinstance(record.result, RecommendationResponse)
-            or isinstance(record.result, PreferenceSimulationResult)
-            for record in state.tool_results
-        )
-
-    @staticmethod
-    def _comparison_selection(state: AgentState) -> ToolSelection | None:
-        if not state.comparison_requested or any(
-            record.error_code is None
-            and isinstance(record.result, ProductComparisonResult)
-            for record in state.tool_results
-        ):
-            return None
-
-        product_ids: list[str] = []
-        for record in reversed(state.tool_results):
-            if isinstance(record.result, RecommendationResponse):
-                product_ids = [
-                    product.product_id for product in record.result.products
-                ]
-                break
-            if isinstance(record.result, PreferenceSimulationResult):
-                product_ids = [
-                    product.product_id
-                    for product in record.result.recommendations.products
-                ]
-                break
-        if len(product_ids) < 2 and not state.fallback_search_allowed:
-            product_ids = state.previously_shown_product_ids
-        if len(product_ids) < 2:
-            return None
-        return ToolSelection(
-            tool_name="product_comparison",
-            arguments={"product_ids": product_ids[:2]},
-        )
-
-    @staticmethod
-    def _fingerprint(selection: ToolSelection) -> str:
-        return selection.tool_name + ":" + json.dumps(
-            selection.arguments,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-
-    def _execute_selection(
-        self,
-        selection: ToolSelection,
-        state: AgentState,
-        db: Session,
-        *,
-        selection_source: ToolSelectionSource = "planner",
-    ) -> int | None:
-        try:
-            arguments = self._registry.validate_arguments(
-                selection.tool_name,
-                selection.arguments,
-            )
-        except (InvalidToolArgumentsError, UnknownToolError):
-            state.tool_results.append(
-                ToolExecutionRecord(
-                    tool_name=selection.tool_name,
-                    arguments={},
-                    error_code="invalid_arguments",
-                    executed=False,
-                    selection_source=selection_source,
-                )
-            )
-            state.completed_steps.append("Invalid tool arguments were rejected.")
-            return None
-
-        if state.remaining_execution_budget <= 0:
-            state.execution_status = "partial"
-            return None
-
-        state.remaining_execution_budget -= 1
-        state.tool_execution_count += 1
-        normalized_arguments = arguments.model_dump(mode="json")
-        try:
-            result = self._registry.execute(
-                selection.tool_name,
-                arguments,
-                state,
-                db,
-            )
-        except Exception as error:
-            logger.error(
-                "Agent tool %s failed (%s).",
-                selection.tool_name,
-                type(error).__name__,
-            )
-            state.tool_results.append(
-                ToolExecutionRecord(
-                    tool_name=selection.tool_name,
-                    arguments=normalized_arguments,
-                    error_code="tool_execution_failed",
-                    selection_source=selection_source,
-                )
-            )
-        else:
-            state.tool_results.append(
-                ToolExecutionRecord(
-                    tool_name=selection.tool_name,
-                    arguments=normalized_arguments,
-                    result=result,
-                    selection_source=selection_source,
-                )
-            )
-        state.completed_steps.append(_TOOL_ACTIVITY[selection.tool_name])
-        return len(state.tool_results) - 1
-
-    def _run_safe_fallback(
-        self,
-        state: AgentState,
-        db: Session,
-        seen_calls: set[str],
-    ) -> None:
-        if not state.fallback_search_allowed or state.constraints.category is None:
-            state.execution_status = "unavailable"
-            return
-        selection = ToolSelection(
-            tool_name="product_search",
-            arguments={"limit": state.request_limit},
-        )
-        fingerprint = self._fingerprint(selection)
-        if fingerprint in seen_calls or state.remaining_execution_budget < 2:
-            state.execution_status = "partial"
-            return
-        seen_calls.add(fingerprint)
-        record_index = self._execute_selection(
-            selection,
-            state,
-            db,
-            selection_source="fallback",
-        )
-        if record_index is None or state.remaining_execution_budget <= 0:
-            state.execution_status = "partial"
-            return
-        evaluation_index = self._execute_selection(
-            ToolSelection(
-                tool_name="evaluate_results",
-                arguments={"result_index": record_index},
-            ),
-            state,
-            db,
-            selection_source="evaluation",
-        )
-        if evaluation_index is not None:
-            result = state.tool_results[evaluation_index].result
-            if isinstance(result, EvaluationResult):
-                state.latest_evaluation = result
-                if result.satisfied:
-                    state.execution_status = "fallback"
-                    return
-                if result.outcome == "constraint_violation":
-                    state.execution_status = "partial"
-                    return
-        comparison_selection = self._comparison_selection(state)
-        if comparison_selection is not None and state.remaining_execution_budget >= 2:
-            comparison_index = self._execute_selection(
-                comparison_selection,
-                state,
-                db,
-                selection_source="policy",
-            )
-            if comparison_index is not None and state.remaining_execution_budget > 0:
-                comparison_evaluation_index = self._execute_selection(
-                    ToolSelection(
-                        tool_name="evaluate_results",
-                        arguments={"result_index": comparison_index},
-                    ),
-                    state,
-                    db,
-                    selection_source="evaluation",
-                )
-                if comparison_evaluation_index is not None:
-                    result = state.tool_results[comparison_evaluation_index].result
-                    if isinstance(result, EvaluationResult):
-                        state.latest_evaluation = result
-                        if result.satisfied:
-                            state.execution_status = "fallback"
-                            return
-        state.execution_status = "partial"
 
     @staticmethod
     def _result(state: AgentState) -> AgentRunResult:

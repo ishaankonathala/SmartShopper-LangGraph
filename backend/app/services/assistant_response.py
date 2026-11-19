@@ -851,6 +851,14 @@ def _normalized_phrase(message: str) -> str:
 def _acknowledgement_response(message: str) -> str | None:
     return _ACKNOWLEDGEMENTS.get(_normalized_phrase(message))
 
+def _is_contextual_refinement(message: str) -> bool:
+    """Identify messages that refine the previous shopping request."""
+    pattern = (
+        r"\b(?:instead|rather|change|switch|lower|raise|increase|"
+        r"reduce|decrease|add|remove|without|keep|make\s+it|"
+        r"what\s+about|how\s+about)\b"
+    )
+    return bool(re.search(pattern, message, re.IGNORECASE))
 
 def _follow_up_action(message: str) -> str | None:
     normalized = " ".join(message.split())
@@ -1803,8 +1811,13 @@ def generate_assistant_response(
     else:
         client = groq_client or GroqClient()
         extraction = extract_assistant_intent(request.message, groq_client=client)
-        if _category_changed(context, extraction.intent):
+        if _category_changed(context, extraction.intent) or (
+            context is not None
+            and extraction.intent.category is not None
+            and not _is_contextual_refinement(request.message)
+        ):
             context = None
+
         intent = _merge_intents(context, extraction.intent)
         extraction_fallback = extraction.fallback_used
         notes = list(extraction.notes)

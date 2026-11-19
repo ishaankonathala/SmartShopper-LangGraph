@@ -31,10 +31,17 @@ from app.schemas.recommendation import (
 AMAZON_PRODUCT_ID_PREFIX = "amazon:"
 _LAPTOP_TITLE_PATTERN = re.compile(r"\b(?:laptop|notebook|chromebook|macbook)\b", re.I)
 _LAPTOP_ACCESSORY_PATTERN = re.compile(
-    r"\b(?:case|sleeve|skin|screen protector|charger|adapter|dock|stand|"
-    r"replacement battery|keyboard cover|backpack)\b",
+    r"\b(?:case|sleeve|skin|screen protector|charger|charging cable|"
+    r"adapter|hub|dock|docking station|stand|replacement battery|"
+    r"keyboard cover|keyboard|mouse|mice|backpack|bag|"
+    r"ethernet cable|usb cable|usb c cable|displayport cable|hdmi cable|"
+    r"webcam|web camera|external hard drive|hard drive|"
+    r"external ssd|portable ssd|solid state drive|"
+    r"cooling pad|laptop cooler|graphics tablet|drawing tablet|"
+    r"headphones|earbuds|bluetooth adapter|usb receiver)\b",
     re.I,
 )
+
 _SMART_WEARABLE_TITLE_PATTERN = re.compile(
     r"\b(?:smart\s?watch|fitness tracker|activity tracker|smart band)\b",
     re.I,

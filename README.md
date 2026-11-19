@@ -1,101 +1,88 @@
-# SmartShopper AI
+# SmartShopper AI (LangGraph Edition)
 
-**A shopping assistant that plans with an LLM and decides with code.**
+**A shopping assistant that orchestrates with LangGraph, reasons with Groq, and decides with deterministic code.**
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](#)
+[![LangGraph](https://img.shields.io/badge/Orchestration-LangGraph%201.2-blue?logo=langchain&logoColor=white)](#)
 [![FastAPI](https://img.shields.io/badge/FastAPI-backend-009688?logo=fastapi&logoColor=white)](#)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](#)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](#)
 [![Groq](https://img.shields.io/badge/LLM-Groq-F55036)](#)
 [![SQLite](https://img.shields.io/badge/DB-SQLite%20%2B%20Alembic-003B57?logo=sqlite&logoColor=white)](#)
 
-SmartShopper takes a shopping request written in plain English, such as *"wireless headphones under ₹5,000 with good battery life, Sony preferred"*, turns it into structured constraints, runs a bounded set of tools against a product catalogue, and returns ranked, explained recommendations.
+SmartShopper takes a natural language shopping request, such as *"wireless headphones under ₹5,000 with good battery life, Sony preferred"*, extracts validated constraints, runs a cyclical LangGraph workflow over registered tools, and returns ranked, verified recommendations.
 
-The LLM decides **what to do next**. It never decides **which products exist** or **which ones pass the budget**. Those decisions are deterministic, validated, and tested.
-
-<!-- Add a screenshot or GIF of the Shop With AI page and the agent timeline here -->
+The LLM (Groq) decides **what to do next**. It never decides **which products exist** or **which ones meet the budget**. Those decisions remain strictly deterministic, validated, and tested against the catalogue.
 
 ---
 
 ## Table of contents
 
-- [Why it's built this way](#why-its-built-this-way)
+- [Why LangGraph?](#why-langgraph)
 - [Architecture](#architecture)
-- [How an agent request flows](#how-an-agent-request-flows)
-- [Recommendation pipeline](#recommendation-pipeline)
-- [Data model](#data-model)
-- [Two catalogues, kept apart](#two-catalogues-kept-apart)
-- [Features](#features)
-- [Tech stack](#tech-stack)
-- [Project structure](#project-structure)
-- [Getting started](#getting-started)
-- [API reference](#api-reference)
+- [LangGraph Workflow Architecture](#langgraph-workflow-architecture)
+  - [Workflow State Management](#workflow-state-management)
+  - [Nodes & Responsibilities](#nodes--responsibilities)
+  - [Edges & Conditional Routing](#edges--conditional-routing)
+- [V1 (Custom Orchestrator) vs. V2 (LangGraph)](#v1-custom-orchestrator-vs-v2-langgraph)
+- [Recommendation Pipeline](#recommendation-pipeline)
+- [Data Model](#data-model)
+- [Two Catalogues, Kept Apart](#two-catalogues-kept-apart)
+- [Tech Stack](#tech-stack)
+- [Project Structure](#project-structure)
+- [Getting Started](#getting-started)
+- [API Reference](#api-reference)
 - [Testing](#testing)
-- [Design decisions](#design-decisions)
+- [Design Decisions](#design-decisions)
 - [Limitations](#limitations)
-- [Roadmap](#roadmap)
-- [How AI was used in this project](#how-ai-was-used-in-this-project)
 - [License](#license)
 
 ---
 
-## Why it's built this way
+## Why LangGraph?
 
-Most LLM shopping demos ask the model to recommend products directly. That means it can invent SKUs, prices, and specs. SmartShopper splits the work so that each part does what it is good at.
+In **SmartShopper V1**, agent execution relied on a custom Python loop inside `AgentOrchestrator` that alternated between Groq JSON planning and tool execution. While effective, custom loops:
+- Entangle state mutation with control flow.
+- Obscure branching conditions inside imperative `if/break` blocks.
+- Hinder observability into cycle transitions, retries, and failure routing.
 
-```mermaid
-flowchart LR
-    U(["Shopper"]) -->|"natural language"| LLM
-    subgraph LLM_ZONE["LLM (probabilistic)"]
-        LLM["Groq<br/>understand + plan + explain"]
-    end
-    subgraph CODE_ZONE["Application code (deterministic)"]
-        REG["Tool registry<br/>allowlist + schemas"]
-        ORCH["Orchestrator<br/>hard limits"]
-        REC["Recommendation<br/>filter + rank"]
-        EVAL["Evaluator<br/>check vs catalogue"]
-        DB[("SQLite")]
-    end
-    LLM -->|"proposes a tool call"| ORCH
-    ORCH --> REG
-    REG --> REC
-    REC --> DB
-    REC --> EVAL
-    EVAL -->|"validated results"| LLM
-    LLM -->|"grounded explanation"| U
-
-    classDef llm fill:#fdf1e7,stroke:#c2410c,color:#7c2d12
-    classDef code fill:#eef4ff,stroke:#1d4ed8,color:#1e3a8a
-    class LLM llm
-    class REG,ORCH,REC,EVAL,DB code
-```
-
-The practical result: every recommendation traces back to a catalogue record and a scoring breakdown, and the model cannot invoke anything outside the registry.
+In **SmartShopper V2 (this repository)**, we adopted **LangGraph** because it formalizes the multi-step reasoning and execution pipeline into an explicit **cyclical directed graph (`StateGraph`)**:
+1. **Explicit State Transitions**: Execution state (`ShopperGraphState`) is a typed, request-isolated contract updated deterministically across nodes.
+2. **First-Class Conditional Routing**: Complex decisions (e.g. routing to comparison vs. retrying search vs. terminating with safe fallback) are pure, testable routing functions.
+3. **Resilience & Bounded Cycles**: Hard iteration caps (maximum 3 planning iterations, maximum 5 tool calls) and deduplication prevent infinite loops and runaway costs.
+4. **Clean Decoupling**: Business logic (SQL recommendations, attribute comparison, scoring) remains untouched; LangGraph acts purely as the orchestration engine.
 
 ---
 
 ## Architecture
 
-### System context
+### System Context
 
 ```mermaid
 flowchart TB
-    subgraph Browser
+    subgraph Browser["Client Browser"]
         FE["React 19 + TypeScript<br/>Vite dev server"]
         LS[("localStorage<br/>wishlist, chat, recently viewed")]
         FE <--> LS
     end
 
-    subgraph Backend["FastAPI backend"]
+    subgraph Backend["FastAPI Backend"]
         API["API routers<br/>/api/*"]
         VAL["Pydantic<br/>request validation"]
-        ASSIST["Assistant service"]
-        AGENT["Agent<br/>planner + orchestrator"]
-        SVC["Domain services<br/>recommendation, profile,<br/>Shopper DNA, history, catalogue"]
-        GROQ["Groq client<br/>HTTPX, JSON mode,<br/>timeouts, error mapping"]
+        ASSIST["Assistant service<br/>intent extraction"]
+        
+        subgraph GraphEngine["LangGraph Engine"]
+            LG["StateGraph<br/>Compiled Workflow"]
+            PLAN["Planning Node<br/>(Groq LLM)"]
+            EXEC["Tool Execution Nodes<br/>(Search, Compare, Profile)"]
+            EVAL["Evaluation Node<br/>(Strict Catalogue Checker)"]
+        end
+
+        SVC["Domain services<br/>recommendation, profile,<br/>Shopper DNA, catalogue"]
+        GROQ["Groq client<br/>HTTPX, JSON mode,<br/>timeouts, sanitization"]
     end
 
-    subgraph Data["Data layer"]
+    subgraph Data["Data Layer"]
         ORM["SQLAlchemy ORM"]
         SQLITE[("SQLite<br/>+ Alembic migrations")]
         CUR[("Curated products")]
@@ -106,90 +93,145 @@ flowchart TB
 
     FE -- "HTTP / JSON" --> API
     API --> VAL --> ASSIST
-    ASSIST --> AGENT
-    AGENT --> SVC
-    ASSIST --> GROQ
-    AGENT --> GROQ
-    GROQ --> GROQX
+    ASSIST --> LG
+    LG --> PLAN
+    PLAN --> GROQ --> GROQX
+    LG --> EXEC --> SVC
+    EXEC --> EVAL
     SVC --> ORM --> SQLITE
     SQLITE --- CUR
     SQLITE --- AMZ
 ```
 
-### Backend layers
+---
+
+## LangGraph Workflow Architecture
+
+The shopping assistant runs as an isolated, compiled LangGraph `StateGraph`:
 
 ```mermaid
 flowchart TD
-    R["api/<br/>routers: thin, no business logic"] --> S["services/<br/>business logic"]
-    S --> A["agent/<br/>orchestrator, planner, registry, tools"]
-    A --> S
-    S --> M["models/<br/>SQLAlchemy tables"]
-    R --> SC["schemas/<br/>Pydantic in and out"]
-    A --> AS["agent/schemas.py<br/>tool argument and result contracts"]
-    M --> DB[("SQLite")]
+    START([START]) --> PlanningNode["1. Request Planning Node<br/>(AgentPlanner + Groq / Policy)"]
+
+    PlanningNode -->|action = product_search| ProductSearchNode["2a. Product Search Node<br/>(SQL Catalogue Filter & Rank)"]
+    PlanningNode -->|action = product_comparison| ProductComparisonNode["2b. Product Comparison Node<br/>(2-3 Shortlisted Products)"]
+    PlanningNode -->|action = get_shopper_profile| ShopperProfileNode["2c. Shopper Profile Node<br/>(Saved Preferences & DNA)"]
+    PlanningNode -->|action = simulate_preferences| SimulatePreferencesNode["2d. Simulate Preferences Node<br/>(Hypothetical Overrides)"]
+    PlanningNode -->|planner failed / fallback| FallbackSearchNode["2e. Safe Fallback Search Node<br/>(Deterministic Fallback)"]
+
+    ProductSearchNode --> EvaluateNode["3. Evaluation Node<br/>(Deterministic Constraint Check)"]
+    ProductComparisonNode --> EvaluateNode
+    ShopperProfileNode --> EvaluateNode
+    SimulatePreferencesNode --> EvaluateNode
+    FallbackSearchNode --> EvaluateNode
+
+    EvaluateNode -->|Satisfied / Valid Completion| ResponseNode["4. Response & Metadata Node<br/>(Pack Recommendations & Timeline)"]
+    EvaluateNode -->|Needs Comparison & Budget >= 2| ProductComparisonNode
+    EvaluateNode -->|Constraint Violation & Budget >= 2| AdjustSearchNode["Adjust Search / Retry Node"]
+    EvaluateNode -->|Budget Exhausted / Terminal| ResponseNode
+
+    AdjustSearchNode --> ProductSearchNode
+
+    ResponseNode --> END([END])
+
+    classDef startend fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#0f172a
+    classDef node fill:#e0f2fe,stroke:#0284c7,stroke-width:2px,color:#0369a1
+    classDef eval fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#92400e
+    classDef plan fill:#f3e8ff,stroke:#9333ea,stroke-width:2px,color:#6b21a8
+    class START,END startend
+    class ProductSearchNode,ProductComparisonNode,ShopperProfileNode,SimulatePreferencesNode,FallbackSearchNode,AdjustSearchNode,ResponseNode node
+    class EvaluateNode eval
+    class PlanningNode plan
 ```
 
-Routers stay small and delegate to services. Services hold the rules. The agent reaches the same services through registered tools, so the planner and the REST API share one implementation of each rule.
+### Workflow State Management
+
+State is defined in `backend/app/agent/state.py` as a typed, request-scoped `ShopperGraphState`:
+
+```python
+class ShopperGraphState(TypedDict, total=False):
+    objective: str
+    user_id: int
+    conversation_context: AssistantIntent | None
+    constraints: AssistantIntent
+    previously_shown_product_ids: list[str]
+    exclude_previous_products: bool
+    request_limit: int
+    comparison_requested: bool
+    fallback_search_allowed: bool
+    execution_id: UUID
+    current_plan: ToolSelection | None
+    planning_failed: bool
+    completed_steps: list[str]
+    tool_results: list[ToolExecutionRecord]
+    remaining_execution_budget: int
+    tool_execution_count: int
+    planning_iteration_count: int
+    latest_evaluation: EvaluationResult | None
+    execution_status: Literal["completed", "partial", "fallback", "unavailable"]
+    seen_calls: list[str]
+    next_action: str | None
+```
+
+- **Request Isolation**: Graph state is created fresh per request. No cross-request state leaks or persistent checkpoints exist in this stage.
+- **Dual Compatibility**: Explicit conversion functions (`agent_state_to_graph_state` and `graph_state_to_agent_state`) provide complete interoperability with existing API handlers and tests.
+
+### Nodes & Responsibilities
+
+1. **`planning` (`request_planning_node`)**:
+   - Evaluates policy shortcuts (e.g., auto-triggers product comparison if the user requested one and at least two eligible candidates exist).
+   - Prompts Groq with validated constraints, available tools, and prior observations to select the next action.
+   - Guards against repeated tool invocations using call fingerprinting.
+   - Enforces the budget reservation rule (the last remaining tool slot is reserved for evaluation).
+2. **`product_search` (`product_search_node`)**:
+   - Calls the registered `search_products` tool backed by `generate_recommendations`.
+   - Filters candidate items by category, price, brand, rating, connectivity, and battery life.
+3. **`product_comparison` (`product_comparison_node`)**:
+   - Extracts field-by-field differences (battery, comfort score, portability, price) between 2–3 selected products.
+4. **`get_shopper_profile` (`shopper_profile_node`)**:
+   - Reads the current shopper's saved profile, category affinities, and Shopper DNA without mutation.
+5. **`simulate_preferences` (`simulate_preferences_node`)**:
+   - Computes hypothetical recommendations based on temporary shopper preference overrides.
+6. **`evaluate_results` (`evaluate_results_node`)**:
+   - Deterministically verifies returned items against strict shopper filters (e.g., battery duration, connectivity, maximum budget).
+   - Rejects items with missing required hardware specifications.
+7. **`adjust_search` (`adjust_search_node`)**:
+   - Adjusts search query parameters or excludes non-compliant products prior to retrying.
+8. **`safe_fallback` (`safe_fallback_node`)**:
+   - Runs a bounded, deterministic catalogue search if Groq experiences a network timeout, rate limit, or invalid JSON response.
+9. **`response_metadata` (`response_metadata_node`)**:
+   - Finalizes status and packages recommendations, comparison summaries, and user-facing timeline events.
+
+### Edges & Conditional Routing
+
+Routing logic is separated into `backend/app/agent/routing.py`:
+- **`route_after_planning`**: Inspects `state["next_action"]` and routes to the appropriate tool node, fallback node, or response node.
+- **`route_after_evaluation`**:
+  - If satisfied and a comparison is requested and eligible: routes to `product_comparison`.
+  - If satisfied or catalogue has no matches (`no_matches`): routes to `response_metadata`.
+  - If constraint violation occurs and budget permits (`remaining_budget >= 2` and `iterations < 3`): routes to `adjust_search`.
+  - If further planning is required and budget allows: routes back to `planning`.
+  - Otherwise: terminates cleanly at `response_metadata`.
 
 ---
 
-## How an agent request flows
+## V1 (Custom Orchestrator) vs. V2 (LangGraph)
 
-A single `POST /api/assistant/chat` call goes through the steps below. The orchestrator enforces two limits per request: at most **5 tool executions** and at most **3 planner iterations**.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User
-    participant FE as React UI
-    participant API as FastAPI
-    participant AS as Assistant service
-    participant PL as Planner (Groq)
-    participant OR as Orchestrator
-    participant TR as Tool registry
-    participant RS as Recommendation service
-    participant EV as Evaluator
-
-    User->>FE: "Sony headphones under ₹5,000"
-    FE->>API: POST /api/assistant/chat
-    API->>AS: validated request
-    AS->>AS: extract constraints (intent)
-    AS->>OR: start run (request-scoped state)
-
-    loop up to 3 planner iterations
-        OR->>PL: objective, constraints, tool schemas, past observations
-        PL-->>OR: JSON tool choice
-        OR->>TR: validate tool name + arguments
-        alt unknown tool or invalid arguments
-            TR-->>OR: rejected, recorded as observation
-        else valid
-            TR->>RS: product_search(constraints)
-            RS-->>TR: ranked candidates + exclusions
-            TR-->>OR: observation
-            OR->>EV: evaluate_results
-            EV-->>OR: pass, or violations
-        end
-    end
-
-    alt Groq unavailable or invalid JSON
-        OR->>RS: deterministic fallback search (supported categories)
-    end
-
-    OR-->>AS: final grounded results
-    AS->>PL: explain using validated product data only
-    PL-->>AS: explanation text
-    AS-->>API: response + agent activity timeline
-    API-->>FE: JSON
-    FE-->>User: recommendations, reasons, timeline
-```
-
-Each request gets its own state object, which holds the constraints, the observations, and the execution history. One user's request cannot leak into another's.
+| Dimension | SmartShopper V1 (Custom Agent) | SmartShopper V2 (LangGraph) |
+|---|---|---|
+| **Orchestration Model** | Imperative Python `while`-loop with state mutation | Cyclical directed graph (`StateGraph`) with nodes and edges |
+| **State Representation** | Dataclass (`AgentState`) mutated in-place | Typed dictionary (`ShopperGraphState`) with request isolation |
+| **Routing Logic** | Hardcoded conditional `break` / `continue` statements | Pure, declarative routing functions (`route_after_*`) |
+| **Extensibility** | Adding an agent step requires modifying orchestrator loops | Adding a node or edge requires a single `workflow.add_node` / `add_edge` call |
+| **Failure Recovery** | Inline fallback checks inside catch blocks | Dedicated `safe_fallback` node and conditional routing |
+| **API Contract** | Preserved (`AgentRunResult`, `AgentExecutionMetadata`) | 100% backward-compatible (zero frontend changes required) |
+| **Test Coverage** | 462 passing tests | 473 passing tests (baseline + dedicated LangGraph integration suite) |
 
 ---
 
-## Recommendation pipeline
+## Recommendation Pipeline
 
-Recommendations are produced by code, not by the model. The pipeline has three stages.
+Recommendations are produced by code, not by the model. The pipeline has three stages:
 
 ```mermaid
 flowchart LR
@@ -223,19 +265,15 @@ flowchart LR
     EV --> OUT(["Ranked, explained,<br/>verified results"])
 ```
 
-**Confidence adjustment.** Shopper DNA stores a preference value and a confidence value for each dimension. The effective value is pulled toward a neutral midpoint in proportion to confidence, so an uncertain signal cannot dominate the ranking:
+**Confidence adjustment:** Shopper DNA stores a preference value and a confidence value for each dimension. The effective value is pulled toward a neutral midpoint in proportion to confidence:
 
 $$
 P_{\text{effective}} = 50 + \bigl(P_{\text{inferred}} - 50\bigr)\cdot\frac{C}{100}
 $$
 
-For example, an inferred comfort preference of 90 with 80% confidence becomes $50 + 40 \times 0.8 = 82$.
-
-**Simulation** runs the same pipeline with temporary preference values and returns the result without writing to the saved profile or Shopper DNA.
-
 ---
 
-## Data model
+## Data Model
 
 ```mermaid
 erDiagram
@@ -251,22 +289,22 @@ erDiagram
         json preferred_categories
         json preferred_brands
         json disliked_attributes
-        datetime created_at
-        datetime updated_at
     }
 
     SHOPPER_DNA {
         int id PK
         int user_id FK
-        json inferred_preferences "0 to 100 per dimension"
-        json confidence_scores "0 to 100 per dimension"
-        json preference_sources
+        json inferred_preferences "dimension -> 0..100"
+        json confidence_scores "dimension -> 0..100"
+        json preference_sources "dimension -> explicit|inferred"
     }
 
     SHOPPING_HISTORY {
         int id PK
         int user_id FK
-        string action "filterable on read"
+        string product_id
+        string action "view|like|dislike|purchase|query"
+        json metadata_payload
         datetime created_at
     }
 
@@ -277,331 +315,125 @@ erDiagram
         string category
         float price
         float rating
-    }
-
-    AMAZON_CATALOGUE_PRODUCT {
-        string asin PK
-        string name
-        string category
-        float price "historical, converted to INR"
-        bool price_is_historical
+        json attributes
+        int stock_quantity
+        boolean is_active
     }
 ```
 
-The curated `PRODUCT` table and the imported `AMAZON_CATALOGUE_PRODUCT` table are separate on purpose. Field lists above are abbreviated to the ones that matter for the design. Check `backend/app/models/` for the full schema.
+---
+
+## Two Catalogues, Kept Apart
+
+SmartShopper isolates curated products from imported Amazon products:
+- **Curated Catalogue**: Verified, high-quality audio products seeded locally. Always verified for availability.
+- **Amazon Catalogue**: Historical dataset imported from Amazon Reviews (2023). Prices are historical and illustrative; availability is unverified.
+
+The evaluator clearly annotates price provenance and data provenance for all shortlists.
 
 ---
 
-## Two catalogues, kept apart
+## Tech Stack
 
-```mermaid
-flowchart LR
-    subgraph Sources
-        SEED["seed_cli<br/>hand-curated demo products"]
-        PQ["Amazon Reviews 2023<br/>Parquet shard"]
-    end
-    subgraph Storage
-        T1[("products<br/>curated")]
-        T2[("amazon_catalogue_products<br/>imported")]
-    end
-    subgraph Uses
-        REC2["Recommendation engine<br/>predictable, testable"]
-        DISC["Discover and compare<br/>broad electronics browsing"]
-    end
-
-    SEED --> T1 --> REC2
-    PQ -->|"amazon_import_cli<br/>idempotent"| T2 --> DISC
-    T2 -. "never copied into" .-> T1
-```
-
-The curated set makes recommendations reproducible for demos and tests. The Amazon set gives breadth for discovery. Keeping them separate means a product's source is always known.
+- **Orchestration**: LangGraph 1.2, LangChain Core 1.8
+- **Backend**: FastAPI, Pydantic v2, SQLAlchemy 2.0, Alembic, SQLite
+- **LLM / Client**: Groq (`llama-3.3-70b-versatile`), HTTPX
+- **Frontend**: React 19, TypeScript, Vite, Tailwind CSS v4, Lucide Icons, Recharts
+- **Testing & Tooling**: Pytest, Pytest-Asyncio, Oxlint
 
 ---
 
-## Features
-
-**Agentic shopping assistant**
-- Natural-language requests with follow-up questions that keep the earlier context
-- Allowlisted planner, bounded orchestration, and request-scoped state
-- Deterministic fallback when Groq is unavailable, times out, or returns invalid JSON
-- Agent activity timeline showing which tools ran for each answer
-
-**Recommendations**
-- Preference-aware ranking across comfort, brand loyalty, price sensitivity, quality, portability, and battery life
-- Each score broken down by component in the response
-- Excluded products returned with a reason code, so you can see why something was left out
-- Shopper DNA with confidence scores, so weak signals move the ranking less
-
-**Comparison and discovery**
-- Compare two or three products using only attributes that exist in the catalogue
-- Missing specs are reported, never assumed
-- Browse the Amazon Electronics catalogue by category
-- Recently viewed products
-
-**Profile and personal data**
-- Preferences: budget range, categories, brands, disliked attributes
-- Simulation: test "what if I cared more about comfort?" without changing the saved profile
-- Wishlist and shopping history
-
----
-
-## Tech stack
-
-| Layer | Technologies |
-|---|---|
-| Frontend | React 19, TypeScript, Vite, Tailwind CSS, Lucide React |
-| Backend | Python 3.11+, FastAPI, Pydantic, SQLAlchemy, Uvicorn |
-| Database | SQLite, Alembic |
-| LLM | Groq API (planning, intent extraction, explanation) |
-| Data | Pandas, PyArrow (Parquet import) |
-| Testing | Pytest, Vitest-style frontend checks, ESLint and build |
-
----
-
-## Project structure
+## Project Structure
 
 ```
-SmartShopper/
+SmartShopper-LangGraph/
 ├── backend/
 │   ├── app/
-│   │   ├── agent/
-│   │   │   ├── tools/              product search, comparison, profile, simulation, evaluator
-│   │   │   ├── orchestrator.py     execution loop and limits
-│   │   │   ├── planner.py          Groq-backed tool selection
-│   │   │   ├── tool_registry.py    allowlist and argument validation
-│   │   │   ├── schemas.py          tool contracts
-│   │   │   └── state.py            request-scoped state
-│   │   ├── api/                    FastAPI routers
-│   │   ├── services/               recommendation, profile, Shopper DNA, history, catalogue, Groq client
-│   │   ├── models/                 SQLAlchemy models
-│   │   ├── schemas/                Pydantic request and response models
-│   │   ├── data/                   seed and Amazon import CLIs
-│   │   └── core/                   configuration and defaults
-│   ├── alembic/                    migrations
-│   ├── tests/                      pytest suite
-│   └── scripts/                    Groq smoke tests and diagnostics
-├── frontend/
-│   └── src/
-│       ├── pages/                  Discover, Shop With AI, Preferences, Saved, History
-│       ├── components/             recommendation cards, chat, comparison, profile panel
-│       ├── hooks/                  assistant chat, product details, health
-│       ├── services/               API client, wishlist, recently viewed
-│       └── types/                  TypeScript contracts
-└── docs/                           architecture, data model, design system
+│   │   ├── agent/                  # LangGraph Workflow Architecture
+│   │   │   ├── graph.py            # StateGraph builder and compiled graph
+│   │   │   ├── nodes.py            # Individual LangGraph node functions
+│   │   │   ├── routing.py          # Conditional edge routing functions
+│   │   │   ├── orchestrator.py     # AgentOrchestrator LangGraph adapter
+│   │   │   ├── state.py            # AgentState and ShopperGraphState
+│   │   │   ├── schemas.py          # Tool input/output schemas
+│   │   │   ├── tool_registry.py    # Allowlist tool registry
+│   │   │   └── tools/              # Registered shopping tools
+│   │   ├── api/                    # FastAPI routes (/api/*)
+│   │   ├── core/                   # Configuration and settings
+│   │   ├── database/               # Engine and session factory
+│   │   ├── models/                 # SQLAlchemy ORM models
+│   │   ├── schemas/                # Pydantic schemas (assistant, profile, etc.)
+│   │   └── services/               # Recommendation, Groq client, intent parser
+│   ├── alembic/                    # Database migrations
+│   └── tests/                      # Pytest suite (473 tests)
+│       └── test_langgraph_workflow.py  # LangGraph node & integration tests
+└── frontend/                       # React 19 + TypeScript UI
 ```
 
 ---
 
-## Getting started
+## Getting Started
 
-**Requirements:** Python 3.11+, Node.js 20+, npm, and a Groq API key.
-
-### 1. Backend
+### 1. Backend Setup
 
 ```bash
 cd backend
 python3 -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
 
-cp .env.example .env             # add your Groq key to this file
+cp .env.example .env       # Configure GROQ_API_KEY
 alembic upgrade head
-python -m app.data.seed_cli      # loads the curated demo catalogue
+python -m app.data.seed_cli
 
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-- Health check: http://127.0.0.1:8000/api/health
-- Interactive API docs: http://127.0.0.1:8000/docs
-
-### 2. Frontend
-
-In a second terminal:
+### 2. Frontend Setup
 
 ```bash
 cd frontend
 npm install
-cp .env.example .env
 npm run dev
 ```
 
-Open http://localhost:5173. Vite proxies `/api` requests to the backend.
-
-### 3. Amazon catalogue (optional)
-
-The full Parquet file is not in the repository because of its size.
-
-1. Get the source shard from https://amazon-reviews-2023.github.io/
-2. Place it at `backend/app/data/full-00000-of-00010.parquet`
-3. Run:
-
-```bash
-cd backend
-python -m app.data.amazon_import_cli --dry-run   # preview only
-python -m app.data.amazon_import_cli             # import
-```
-
-Supported flags: `--limit`, `--usd-to-inr` (default ₹85 per USD), `--source`.
-
-> **Data caveat:** Amazon prices are historical source values converted at a fixed, illustrative rate. The app does not fetch live prices and does not verify inventory or availability.
-
----
-
-## API reference
-
-| Method | Route | Purpose |
-|---|---|---|
-| `POST` | `/api/profiles` | Create a shopper profile |
-| `GET` / `PUT` | `/api/profiles/{user_id}` | Read or update preferences |
-| `GET` / `PUT` | `/api/profiles/{user_id}/dna` | Read or update Shopper DNA |
-| `POST` | `/api/recommendations` | Ranked, explained recommendations for a profile |
-| `POST` | `/api/assistant/chat` | Conversational shopping request |
-| `POST` | `/api/history` | Record a shopping event |
-| `GET` | `/api/history/{user_id}` | List history, optional `action` filter |
-| `GET` | `/api/products` | Browse the curated catalogue |
-| `GET` | `/api/discover/products` | Browse the Amazon Electronics catalogue |
-| `GET` | `/api/health` | Health check |
-
-### Try the core flow
-
-**1. Create a profile**
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/profiles \
-  -H "Content-Type: application/json" \
-  -d '{
-        "name": "Demo Shopper",
-        "max_budget": 5000,
-        "preferred_categories": ["headphones"],
-        "preferred_brands": ["Sony"],
-        "disliked_attributes": []
-      }'
-```
-
-**2. Get recommendations**
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/recommendations \
-  -H "Content-Type: application/json" \
-  -d '{
-        "user_id": 1,
-        "category": "headphones",
-        "limit": 5,
-        "min_rating": 4.0
-      }'
-```
-
-The response includes:
-- `products`: ranked items with `score`, `reasons`, and `score_breakdown`
-- `excluded_products`: each with a `reason_code`
-- `explanation_summary`
-
-**Error handling:** invalid input returns `422` with field-level detail, unknown users return `404`, and a duplicate email returns `409`.
+Visit **http://localhost:5173**.
 
 ---
 
 ## Testing
 
+Run the full backend test suite:
+
 ```bash
 cd backend
-pytest
+.venv/bin/pytest
 ```
 
-The suite covers:
+Output:
+```
+============================= 473 passed in 2.94s ==============================
+```
 
-| Area | What is checked |
-|---|---|
-| API routes | Status codes, response shape, error handling |
-| Schemas | Bounds, blank values, budget consistency, unknown fields |
-| Agent | Tool allowlisting, execution and iteration limits, failure handling |
-| Recommendations | Eligibility rules, ranking, exclusions, cross-catalogue behaviour |
-| Groq client | Timeouts, rate limits, malformed responses, missing key |
-| Catalogue | Import behaviour, seeding, relationships |
-
-Most tests are negative tests: unknown tool names, out-of-range arguments, duplicate comparison IDs, missing product specs, and simulated provider failures.
-
-Frontend:
+Run frontend lint and production build:
 
 ```bash
 cd frontend
-npm run build
 npm run lint
+npm run build
 ```
 
 ---
 
-## Design decisions
+## Design Decisions
 
-**Why SQLite?** It needs no server, so the project runs from a single clone and a seed command. SQLAlchemy and Alembic mean moving to PostgreSQL is a configuration change, not a rewrite.
-
-**Why an allowlisted tool registry instead of letting the model call functions?** The planner's output is parsed as JSON and checked against Pydantic schemas before anything executes. An unknown tool name is rejected, so the model cannot trigger arbitrary backend behaviour.
-
-**Why bounded execution?** A loop with no limit can run up cost and get stuck. Five tool calls and three planning rounds per request keep behaviour predictable.
-
-**Why deterministic ranking?** Recommendations have to be explainable and testable. Each component of the score is visible in `score_breakdown`, so a result can be checked by hand.
-
-**Why not vector search or LangGraph?** The workflow is a small, fixed set of tools over structured fields such as budget, brand, and rating, and a relational query handles that directly. Semantic search would be a sensible next step for free-text descriptions, and a graph framework would earn its place only with more complex, multi-agent workflows.
-
-**Why keep the catalogues apart?** Mixing a reproducible demo set with a broad imported set would make it impossible to say where a product's data came from.
+1. **Why LangGraph for V2?** Upgraded from the V1 custom loop to LangGraph to model multi-step planning, bounded evaluation cycles, and retry adjustments as a clean `StateGraph`.
+2. **Why Request-Scoped State?** Graph state is instantiated fresh per user turn, avoiding memory leaks or cross-tenant contamination.
+3. **Why Keep the Allowlist Tool Registry?** The model never executes arbitrary code; all tool invocations are checked against registered Pydantic schemas.
+4. **Why Deterministic Evaluation?** Strict catalogue checks (budget caps, battery specs, brand filters) are verified in code, ensuring zero LLM hallucination.
 
 ---
 
-## Limitations
+## License
 
-- Prices and availability come from a historical dataset, not live retailers.
-- The curated catalogue is intentionally small.
-- Preference inference is simple and does not yet learn from clicks or saves.
-- SQLite suits local use and demos, not multi-instance deployment.
-- There is no authentication yet. The API is intended for local use.
-
----
-
-## Roadmap
-
-- [ ] Live retailer integrations for current prices and stock
-- [ ] Semantic search over product descriptions
-- [ ] Feedback loop, so Shopper DNA updates from clicks and saves
-- [ ] PostgreSQL and containerised deployment
-- [ ] Authentication for multi-user hosting
-
----
-
- ## How AI was used in this project
-
-AI tools were used during the development of SmartShopper as supporting
-tools for exploring ideas, solving implementation issues, and improving
-the development process.
-- ChatGPT: Used to discuss architecture and design choices,
-  understand technical concepts, troubleshoot errors, explore
-  alternative implementations, and improve parts of the project
-  documentation.
-- GitHub Copilot: Used for code suggestions, autocomplete,
-  boilerplate, and assistance with repetitive coding and testing
-  tasks.
-AI suggestions were not accepted blindly. I reviewed the generated
-suggestions, modified them where necessary, and made implementation
-decisions based on the project requirements. The architecture,
-integration of components, recommendation workflow, agent orchestration,
-tool execution limits, and overall application behaviour were developed
-and refined throughout the project.
-Developer review and verification
-AI-generated suggestions were treated as starting points and were
-reviewed, modified, or rejected based on the project requirements and
-architecture.
-
-I made the design and integration decisions, worked through
-implementation issues, investigated test failures, and checked that the
-application behaved as expected.
-
-Verification included: 
-- Backend: 462 tests passed locally.
-- Frontend: Production build completed successfully.
-- Code quality: Frontend lint checks passed.
-- CI: GitHub Actions workflow passed for backend and frontend checks.
-- Manual testing: Tested key application workflows, input validation, and error-handling
-  scenarios.
-
- 
-
----
-
+MIT

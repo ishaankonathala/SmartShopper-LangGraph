@@ -292,6 +292,83 @@ def test_combined_catalogues_apply_category_budget_and_brand_filters(
     assert all(2000 <= product.price <= 3000 for product in response.products)
 
 
+def test_laptop_category_excludes_accessories_and_other_computer_products(
+    db_session: Session,
+) -> None:
+    seed_products(db_session)
+    user_id = _create_profile(db_session)
+
+    # Create one genuine laptop and three incorrect product matches.
+    laptop = _add_amazon_product(
+        db_session,
+        asin="B000000201",
+        title="Acer Aspire 3 Slim Laptop AMD Ryzen 5 8GB RAM 512GB SSD",
+        category="Computers & Accessories",
+        price_inr=37400,
+    )
+
+    headphones = _add_amazon_product(
+        db_session,
+        asin="B000000202",
+        title="AILIHEN C8 Wired Headphones for Chromebook Laptop Computer",
+        category="Computers & Accessories",
+        price_inr=1800,
+    )
+
+    tablet = _add_amazon_product(
+        db_session,
+        asin="B000000203",
+        title="Wacom Intuos Small Bluetooth Graphics Drawing Tablet Chromebook",
+        category="Computers & Accessories",
+        price_inr=7000,
+    )
+
+    external_ssd = _add_amazon_product(
+        db_session,
+        asin="B000000204",
+        title="Seagate Expansion SSD 1TB External Solid State Drive for PC Laptop",
+        category="Computers & Accessories",
+        price_inr=11000,
+    )
+
+    response = generate_recommendations(
+        db_session,
+        RecommendationRequest(
+            user_id=user_id,
+            category="Laptops",
+            max_budget_override=50000,
+            include_unverified_availability=True,
+            limit=25,
+        ),
+        product_snapshot=[
+            laptop,
+            headphones,
+            tablet,
+            external_ssd,
+        ],
+    )
+
+    returned_ids = {
+        product.product_id for product in response.products
+    }
+
+    # The genuine laptop must be recommended.
+    assert "amazon:B000000201" in returned_ids
+
+    # Other computer-related products must be excluded.
+    assert "amazon:B000000202" not in returned_ids
+    assert "amazon:B000000203" not in returned_ids
+    assert "amazon:B000000204" not in returned_ids
+
+    excluded = {
+        product.product_id: product.reason_code
+        for product in response.excluded_products
+    }
+
+    assert excluded["amazon:B000000202"] == "category_mismatch"
+    assert excluded["amazon:B000000203"] == "category_mismatch"
+    assert excluded["amazon:B000000204"] == "category_mismatch"
+
 def test_strict_battery_filters_apply_to_both_catalogues(
     db_session: Session,
 ) -> None:

@@ -665,15 +665,23 @@ def extract_assistant_intent(
             "min_budget_override",
             "brand",
             "min_rating",
-            "availability_requirement",
             "min_battery_life_hours",
             "require_battery_life_data",
         )
+
         intent = intent.model_copy(
             update={
                 field: getattr(deterministic_intent, field)
                 for field in hard_filter_fields
                 if getattr(deterministic_intent, field) is not None
+            }
+        )
+
+        intent = intent.model_copy(
+            update={
+                "availability_requirement": (
+                    deterministic_intent.availability_requirement
+                )
             }
         )
         if not _is_explicit_brand_name(message, intent.brand):

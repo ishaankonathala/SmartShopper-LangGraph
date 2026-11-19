@@ -99,3 +99,37 @@ def test_profile_dna_relationship(client: TestClient, sample_profile_payload: di
     created = client.post("/api/profiles", json=sample_profile_payload).json()
     dna = client.get(f"/api/profiles/{created['id']}/dna").json()
     assert dna["user_id"] == created["id"]
+
+
+def test_seed_demo_profile_creates_and_retrieves_demo_user(db_session: Session) -> None:
+    from app.services.seed import seed_demo_profile, DEMO_USER_ID
+
+    # Initial seed
+    profile = seed_demo_profile(db_session)
+    assert profile.id == DEMO_USER_ID
+    assert profile.name == "Demo Shopper"
+    assert profile.max_budget == 6500.0
+    assert profile.dna is not None
+    assert profile.dna.inferred_preferences["comfort_priority"] == 50
+
+    # Idempotent second seed does not duplicate or alter
+    second_profile = seed_demo_profile(db_session)
+    assert second_profile.id == DEMO_USER_ID
+    assert db_session.query(UserProfile).filter_by(id=DEMO_USER_ID).count() == 1
+
+
+def test_demo_profile_accessible_via_api(client: TestClient, db_session: Session) -> None:
+    from app.services.seed import seed_demo_profile, DEMO_USER_ID
+
+    # Seed demo profile in the test session
+    seed_demo_profile(db_session)
+
+    # API endpoints should retrieve profile and DNA successfully
+    profile_res = client.get(f"/api/profiles/{DEMO_USER_ID}")
+    assert profile_res.status_code == 200
+    assert profile_res.json()["id"] == DEMO_USER_ID
+    assert profile_res.json()["name"] == "Demo Shopper"
+
+    dna_res = client.get(f"/api/profiles/{DEMO_USER_ID}/dna")
+    assert dna_res.status_code == 200
+    assert dna_res.json()["user_id"] == DEMO_USER_ID

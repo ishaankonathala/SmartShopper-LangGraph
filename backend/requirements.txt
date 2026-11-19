@@ -36,3 +36,5 @@ watchfiles==1.3.0
 websockets==17.4
 groq==1.7.0
 pyarrow==26.0.1
+langgraph==1.2.23
+langchain-core==1.8.3

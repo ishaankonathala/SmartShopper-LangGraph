@@ -805,6 +805,55 @@ def test_explicitly_switching_to_wired_keeps_budget_and_battery_priority(
     assert all(product["price"] <= 5000 for product in changed["recommendations"])
 
 
+def test_new_search_resets_stale_filters_from_previous_search(
+    seeded_client: TestClient,
+    sample_profile_payload: dict,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = _create_user(seeded_client, sample_profile_payload)
+
+    _add_headphones(
+        db_session,
+        product_id="SS-HP-FRESH-SEARCH",
+        price=4000,
+        connectivity="wireless",
+        brand="TestAudio",
+        rating=4.0,
+        battery_life_hours=10,
+    )
+    _disable_groq(monkeypatch)
+
+    response = seeded_client.post(
+        "/api/assistant/chat",
+        json={
+            "user_id": user_id,
+            "message": "Find wireless headphones under ₹5,000.",
+            "conversation_context": {
+                "category": "Headphones",
+                "brand": "Sony",
+                "max_budget_override": 6000,
+                "min_rating": 4.5,
+                "min_battery_life_hours": 20,
+                "require_battery_life_data": True,
+                "availability_requirement": "available",
+                "connectivity_requirement": "wireless",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    intent = response.json()["intent"]
+
+    assert intent["category"] == "Headphones"
+    assert intent["max_budget_override"] == 5000
+    assert intent["brand"] is None
+    assert intent["min_rating"] is None
+    assert intent["min_battery_life_hours"] is None
+    assert intent["require_battery_life_data"] is None
+    assert intent["availability_requirement"] is None
+    assert intent["connectivity_requirement"] == "wireless"
+
 def test_explicit_budget_follow_up_narrows_budget_and_retains_connectivity(
     seeded_client: TestClient,
     sample_profile_payload: dict,

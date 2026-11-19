@@ -1,10 +1,20 @@
-"""Idempotent catalogue seeding — never touches user profiles or history."""
+"""Idempotent catalogue and demo profile seeding."""
 
+from typing import Final
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.dna_defaults import (
+    DEFAULT_CONFIDENCE_SCORES,
+    DEFAULT_INFERRED_PREFERENCES,
+    DEFAULT_PREFERENCE_SOURCES,
+)
 from app.data.catalogue import DEMO_PRODUCTS
 from app.models.product import Product
+from app.models.shopper_dna import ShopperDNA
+from app.models.user_profile import UserProfile
+
+DEMO_USER_ID: Final[int] = 1
 
 
 def seed_products(db: Session) -> dict[str, int]:
@@ -66,3 +76,38 @@ def seed_products(db: Session) -> dict[str, int]:
         "skipped": skipped,
         "total_in_seed_file": len(DEMO_PRODUCTS),
     }
+
+
+def seed_demo_profile(db: Session) -> UserProfile:
+    """Ensure the default demo shopper profile exists with ID=1.
+
+    Safe and idempotent — preserves existing profile data without overwriting.
+    """
+    existing = db.get(UserProfile, DEMO_USER_ID)
+    if existing is not None:
+        return existing
+
+    email = "demo@smartshopper.local"
+    email_conflict = db.scalar(select(UserProfile).where(UserProfile.email == email))
+    if email_conflict is not None:
+        email = None
+
+    profile = UserProfile(
+        id=DEMO_USER_ID,
+        name="Demo Shopper",
+        email=email,
+        max_budget=6500.0,
+        min_budget=1000.0,
+        preferred_categories=["Headphones"],
+        preferred_brands=["Sony"],
+        disliked_attributes=["bulky"],
+    )
+    profile.dna = ShopperDNA(
+        inferred_preferences=dict(DEFAULT_INFERRED_PREFERENCES),
+        confidence_scores=dict(DEFAULT_CONFIDENCE_SCORES),
+        preference_sources=dict(DEFAULT_PREFERENCE_SOURCES),
+    )
+    db.add(profile)
+    db.commit()
+    db.refresh(profile)
+    return profile
