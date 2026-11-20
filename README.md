@@ -544,6 +544,33 @@ npm run build
 | Bounded execution | Controls repeated actions and unnecessary LLM calls. |
 
 ---
+## 🤖 AI Usage & Development Tools
+
+### Development Environment
+- **Visual Studio Code:** Used as the primary development environment for writing, debugging, testing, and managing the application code.
+- **Claude:** Used as an AI-assisted development tool for technical guidance, debugging assistance, exploring implementation approaches, and improving code quality.
+
+### How AI Was Used
+AI assistance was used selectively during development for:
+- Exploring architecture and implementation approaches for the LangGraph agent workflow.
+- Understanding and resolving technical issues during development.
+- Getting suggestions for improving code structure and handling edge cases.
+- Assisting with debugging and interpreting test failures.
+- Supporting technical documentation.
+
+### Developer Contributions & Verification
+The application was developed through iterative implementation, testing, and refinement. AI suggestions were treated as references rather than blindly accepted solutions.
+
+The developer was responsible for:
+- Designing and integrating the application components.
+- Implementing and connecting the frontend, backend, database, and LangGraph workflow.
+- Reviewing and adapting suggested code to match the application requirements.
+- Testing agent routing, tool execution, recommendation logic, and API behaviour.
+- Debugging issues and validating functionality through automated tests.
+
+All final implementation decisions and project integration were reviewed by the developer.
+
+---
 
 ## 🔮 Future Scope
 
