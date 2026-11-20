@@ -110,6 +110,14 @@ flowchart TB
 6. **Evaluation:** The system checks whether the results satisfy the user's requirements.
 7. **Response:** The assistant returns recommendations with relevant explanations.
 
+## 🎥 Project Demo
+
+Watch the complete SmartShopper V2 application walkthrough:
+
+[▶️ Watch SmartShopper V2 Demo](https://drive.google.com/file/d/19NqmHme-ZpBPEcrWuKHfnvTIvZuaAaWA/view?usp=sharing)
+
+The demo covers the application's features, multi-agent workflow, LangGraph orchestration, architecture, and end-to-end functionality.
+
 ---
 
 ## 🧠 Inside the LangGraph Agent
